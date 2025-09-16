@@ -21,6 +21,8 @@ import numpy as np
 from typing import Union
 from .affine_transform import AlignRestore
 from .face_detector import FaceDetector
+import os
+import pickle
 
 
 def load_fixed_mask(resolution: int, mask_image_path="latentsync/utils/mask.png") -> torch.Tensor:
@@ -51,12 +53,15 @@ class ImageProcessor:
         else:
             self.face_detector = FaceDetector(device=device)
 
-    def affine_transform(self, image: torch.Tensor) -> np.ndarray:
+    def affine_transform(self, image: torch.Tensor, old_data = None, return_old_data = False) -> np.ndarray:
         if self.face_detector is None:
             raise NotImplementedError("Using the CPU for face detection is not supported")
         bbox, landmark_2d_106 = self.face_detector(image)
         if bbox is None:
-            raise RuntimeError("Face not detected")
+            print('WARNING, face not detected')
+            bbox, landmark_2d_106 = old_data 
+            if old_data is None:
+                raise RuntimeError("Face not detected and old_data is not provided")
 
         pt_left_eye = np.mean(landmark_2d_106[[43, 48, 49, 51, 50]], axis=0)  # left eyebrow center
         pt_right_eye = np.mean(landmark_2d_106[101:106], axis=0)  # right eyebrow center
@@ -68,7 +73,11 @@ class ImageProcessor:
         box = [0, 0, face.shape[1], face.shape[0]]  # x1, y1, x2, y2
         face = cv2.resize(face, (self.resolution, self.resolution), interpolation=cv2.INTER_LANCZOS4)
         face = rearrange(torch.from_numpy(face), "h w c -> c h w")
-        return face, box, affine_matrix
+
+        if return_old_data:
+            return face, box, affine_matrix, (bbox, landmark_2d_106)
+        else:
+            return face, box, affine_matrix
 
     def preprocess_fixed_mask_image(self, image: torch.Tensor, affine_transform=False):
         if affine_transform:
@@ -107,12 +116,17 @@ class VideoProcessor:
     def affine_transform_video(self, video_path):
         video_frames = read_video(video_path, change_fps=False)
         results = []
+        old_data = None
+        if os.path.exists('old_data.pth'):
+            old_data = pickle.load(open('old_data.pth', 'rb'))
         for frame in video_frames:
-            frame, _, _ = self.image_processor.affine_transform(frame)
+            frame, _, _, old_data = self.image_processor.affine_transform(frame, old_data, return_old_data=True)
             results.append(frame)
         results = torch.stack(results)
 
         results = rearrange(results, "f c h w -> f h w c").numpy()
+        with open('old_data.pth', 'wb') as f:
+            pickle.dump(old_data, f)
         return results
 
 
